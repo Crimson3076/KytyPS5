@@ -5421,6 +5421,21 @@ void TestNewShaderRecompilerNullImageUsesCanonical2DView() {
         "null image retained the decoded 1D descriptor binding");
 }
 
+void TestNewShaderRecompilerImageGatherExplicitLod() {
+  const uint32_t shader[] = {0xf110010au, 0x01200801u, 0x00001900u, 0xbf810000u};
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  auto user_data = ImageTestUserData();
+  options.user_data = user_data;
+  options.dump_ir = true;
+  auto result = RecompileForTest(shader, options);
+  Check(Common::ContainsStr(result.decoded_dump, "IMAGE_GATHER4_L"), "explicit LOD gather decode");
+  Check(SpirvContainsOpcode(result.spirv, 103), "gather must query mip dimensions");
+  Check(SpirvContainsOpcode(result.spirv, 106), "gather must query mip count");
+  Check(SpirvContainsOpcode(result.spirv, 88), "gather must emit explicit LOD samples");
+  Check(!SpirvContainsOpcode(result.spirv, 96), "explicit LOD must not become implicit gather");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
 void TestNewShaderRecompilerImageGatherVariants() {
   const uint32_t shader[] = {
       EncodeMimg0(0x47, 0x1),
@@ -13333,6 +13348,7 @@ int main() {
   TestComputeLdsAllocationIdentity();
   TestPixelProgramCacheBindingIdentity();
   TestGraphicsPushConstantPlacement();
+  TestNewShaderRecompilerImageGatherExplicitLod();
   TestNewShaderRecompilerUnsupportedMemoryDecode();
 
   return 0;

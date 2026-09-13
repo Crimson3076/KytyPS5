@@ -472,6 +472,74 @@ uint32_t EmitOneDimensionalGatherLz(ValueEmitContext& ctx, const IR::MemoryInfo&
 	return result;
 }
 
+uint32_t EmitTwoDimensionalGatherLod(ValueEmitContext& ctx, const IR::MemoryInfo& mem,
+                                     uint32_t coord, uint32_t requested_lod,
+                                     Prospero::TextureNumericClass numeric_class) {
+	auto& state = ctx.state;
+	state.builder.RequireCapability(spv::CapabilityImageQuery);
+	const auto image = LoadSampledImageDescriptor(state, mem.resource);
+	const auto levels = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpImageQueryLevels, TypeU32(state), levels, image);
+	const auto max_level = Binary(state, spv::OpISub, TypeU32(state), levels, ConstantU32(state, 1));
+	const auto max_lod = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpConvertUToF, TypeF32(state), max_lod, max_level);
+	const auto clamped = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpExtInst, TypeF32(state), clamped, GlslStd450(state),
+	                          GLSLstd450FClamp, requested_lod, ZeroF32(state), max_lod);
+	const auto lod = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpExtInst, TypeF32(state), lod, GlslStd450(state),
+	                          GLSLstd450Floor,
+	                          Binary(state, spv::OpFAdd, TypeF32(state), clamped,
+	                                 ConstantF32(state, 0x3f000000u)));
+	const auto level = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpConvertFToU, TypeU32(state), level, lod);
+	const auto size = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpImageQuerySizeLod, TypeU32Vector(state, 2), size, image, level);
+	uint32_t dimensions[2] {};
+	uint32_t origin[2] {};
+	for (uint32_t axis = 0; axis < 2; axis++) {
+		const auto extent = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), extent, size, axis);
+		dimensions[axis] = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpConvertUToF, TypeF32(state), dimensions[axis], extent);
+		const auto uv = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), uv, coord, axis);
+		origin[axis] = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpExtInst, TypeF32(state), origin[axis], GlslStd450(state),
+		                          GLSLstd450Floor,
+		                          Binary(state, spv::OpFSub, TypeF32(state),
+		                                 Binary(state, spv::OpFMul, TypeF32(state), uv, dimensions[axis]),
+		                                 ConstantF32(state, 0x3f000000u)));
+	}
+	const auto sampled = MakeSampledImage(state, mem.resource, mem.sampler);
+	const auto vector_type = ImageVectorType(state, numeric_class, 4);
+	const auto scalar_type = ImageScalarType(state, numeric_class);
+	const auto component = ImageConversionFormat(state, mem).format == Prospero::BufferFormat::kInvalid
+	                           ? ImageGatherComponent(mem.dmask) : 0u;
+	constexpr uint32_t offsets[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
+	uint32_t values[4] {};
+	for (uint32_t tap = 0; tap < 4; tap++) {
+		uint32_t uv[2] {};
+		for (uint32_t axis = 0; axis < 2; axis++) {
+			uv[axis] = Binary(state, spv::OpFDiv, TypeF32(state),
+			                  Binary(state, spv::OpFAdd, TypeF32(state), origin[axis],
+			                         ConstantF32(state, offsets[tap][axis] == 0 ? 0x3f000000u : 0x3fc00000u)),
+			                  dimensions[axis]);
+		}
+		const auto tap_coord = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 2), tap_coord, uv[0], uv[1]);
+		const auto texel = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpImageSampleExplicitLod, vector_type, texel, sampled,
+		                          tap_coord, spv::ImageOperandsLodMask, lod);
+		values[tap] = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, scalar_type, values[tap], texel, component);
+	}
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, vector_type, result,
+	                          values[0], values[1], values[2], values[3]);
+	return result;
+}
+
 uint32_t PackImageTexel(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t texel) {
 	const auto info = ImageConversionFormat(ctx.state, mem);
 	if (info.format == Prospero::BufferFormat::kInvalid) return texel;
@@ -646,6 +714,18 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		const auto coord =
 		    CoordF32(ctx, mem, *address, layout.coord, dimension_info.coordinate_components);
 		if (op == IR::ValueOpcode::ImageGatherRaw) {
+			if (HasFlag(mem, Decoder::ImageSampleFlagLod)) {
+				if (dimension != ImageDimension::Dim2D || dref || layout.lod == NoImageComponent) {
+					ctx.Fail(inst, "explicit-LOD gather experiment supports only non-comparison 2D images");
+					return;
+				}
+				const auto gathered = EmitTwoDimensionalGatherLod(
+				    ctx, mem, coord, AddressF32(ctx, mem, *address, layout.lod), numeric_class);
+				ctx.Define(inst, ResultVector(ctx, UnpackImageGather(ctx, mem, gathered),
+				                              numeric_class, false, mem, true));
+				return;
+			}
+
 			if (dimension == ImageDimension::Dim1D) {
 				if (dref || !HasFlag(mem, Decoder::ImageSampleFlagLevelZero) ||
 				    HasFlag(mem, Decoder::ImageSampleFlagOffset) ||

@@ -1,7 +1,7 @@
-name: AGC buffer Linux test build
+name: Experimental explicit LOD gather Linux build
 on:
   push:
-    branches: [fix/agc-null-cursor-boundary]
+    branches: [experiment/mimg-gather-lod]
   workflow_dispatch:
 permissions:
   contents: read
@@ -98,7 +98,7 @@ jobs:
         shell: bash
         run: |
           cmake --build _Build/linux \
-            --target launcher agc_command_buffer_tests page_manager_tests memory_tracker_tests \
+            --target launcher shader_cfg_tests agc_command_buffer_tests page_manager_tests memory_tracker_tests \
               audio_out2_port_tests ime_dialog_tests virtual_memory_allocation_tests \
             --parallel
 
@@ -106,7 +106,7 @@ jobs:
         shell: bash
         run: |
           ctest --test-dir _Build/linux --output-on-failure \
-            -R '^(agc_command_buffer|audio_out2_port|ime_dialog|page_manager|memory_tracker|virtual_memory_allocation)$'
+            -R '^(shader_cfg|agc_command_buffer|audio_out2_port|ime_dialog|page_manager|memory_tracker|virtual_memory_allocation)$'
 
       - name: Install
         shell: bash
